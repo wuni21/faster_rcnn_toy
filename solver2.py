@@ -6,13 +6,8 @@ from tqdm import tqdm
 import numpy as np
 import torch.nn.functional as F
 import torch.optim as optim
-
-
 import matplotlib.pyplot as plt
 import matplotlib.patches as patches
-from PIL import Image
-
-
 
 class Solver(object):
     def __init__(self, args):
@@ -43,18 +38,12 @@ class Solver(object):
         '''for image restoration'''
 
         self.opt_rpn = optim.SGD(list(self.feature_extractor.parameters())+list(self.rpn.parameters()), lr=0.001, momentum=0.9)
-        # self.opt_roi = optim.SGD(list(self.feature_extractor.parameters()) + list(self.roi_head_classifier.parameters())
-        #                          + list(self.cls_loc.parameters()) + list(self.score.parameters()), lr=0.0001, momentum=0.9)
-        # self.opt_roi = optim.SGD(list(self.roi_head_classifier.parameters())
-        #                          + list(self.cls_loc.parameters()) + list(self.score.parameters()), lr=0.001,
-        #                          momentum=0.9)
-        self.opt_roi = optim.Adam(list(self.feature_extractor.parameters()) + list(self.roi_head_classifier.parameters())
-                                  + list(self.cls_loc.parameters()) + list(self.score.parameters()), lr=0.0001)
-        # self.opt_roi = optim.SGD(list(self.feature_extractor.parameters()) + list(self.roi_head_classifier.parameters()),
-        #                          list(self.score.parameters()), lr=0.001, momentum=0.9)
-        # self.opt_total = optim.SGD(list(self.feature_extractor.parameters())+ list(self.roi_head_classifier.parameters()) + list(self.score.parameters()), lr=0.1, momentum=0.9)
-        # self.opt_restoration_Mask_Encoder = optim.Adam(self.Mask_Encoder.parameters(), lr=0.0002, betas=(0.5, 0.999))
-        # self.opt_total =
+
+        # self.opt_roi = optim.Adam(list(self.feature_extractor.parameters()) + list(self.roi_head_classifier.parameters())
+        #                           + list(self.cls_loc.parameters()) + list(self.score.parameters()), lr=0.0001)
+        self.opt_roi = optim.SGD(list(self.feature_extractor.parameters()) + list(self.roi_head_classifier.parameters())
+                                  + list(self.cls_loc.parameters()) + list(self.score.parameters()), lr=0.001, momentum=0.9)
+
 
         '''sub sample rate'''
         self.sub_sample = 2
@@ -70,7 +59,6 @@ class Solver(object):
         self.n_test_pre_nms = 6000
         self.n_test_post_nms = 300
         self.min_size = 16
-        # print(self.anchor_valid.shape)
 
 
         '''
@@ -78,7 +66,7 @@ class Solver(object):
         '''
         '''inlier train dataset'''
         self.train_dataset = dataset(dataset='detection mnist', mode='train')
-        self.train_loader = torch.utils.data.DataLoader(self.train_dataset, batch_size=self.args.batch_size, shuffle=True)
+        self.train_loader = torch.utils.data.DataLoader(self.train_dataset, batch_size=1, shuffle=True)
         self.test_loader = torch.utils.data.DataLoader(self.train_dataset, batch_size=1, shuffle=False)
 
         self.adaptive_max_pool = nn.AdaptiveMaxPool2d((7, 7))
@@ -87,7 +75,6 @@ class Solver(object):
     def reset_grad(self):
         self.opt_rpn.zero_grad()
         self.opt_roi.zero_grad()
-        # self.opt_total.zero_grad()
 
     '''Train'''
     def train(self, epoch, mode):
@@ -107,18 +94,15 @@ class Solver(object):
         losses['roi'] = []
         losses['total'] = []
 
-
         ##################################################################################
         for batch_idx, (im_data, gt_boxes, labels) in enumerate(tqdm(self.train_loader, desc='Epoch: '+str(epoch))):
             im_data, gt_boxes, labels = im_data.to(device), np.squeeze(gt_boxes), labels
             gt_boxes = np.squeeze(gt_boxes.numpy())
             labels = np.squeeze(labels.numpy())
-            # print(gt_boxes.shape)
             im_h, im_w = im_data.size()[2], im_data.size()[3]
-            # print(im_data.shape)
 
             '''Process anchor'''
-            print(gt_boxes.shape)
+            '''Make Anchor boxes and label them based on thresholds'''
             anchors, anchor_labels, anchor_locations = self.process_anchor(im_h=im_h, im_w=im_w, bbox=gt_boxes, sub_sample=self.sub_sample,
                                                                   ratios=self.anchor_ratios, scales=self.anchor_scales,
                                                                   pos_iou_threshold=self.pos_iou_threshold,
@@ -135,124 +119,12 @@ class Solver(object):
             objectness_score = pred_cls_scores.view(1, 50, 50, 9, 2)[:, :, :, :, 1].contiguous().view(1, -1)
             pred_cls_scores = pred_cls_scores.view(1, -1, 2)
 
-
-            '''anchor proposal'''
-
-            print(pred_anchor_locs.shape)
-            roi, after_delta = self.anchor_proposal(img_size=(im_h, im_w), anchors=anchors,
-                                       pred_anchor_locs=pred_anchor_locs[0].cpu().data.numpy(),
-                                       objectness_score=objectness_score[0].cpu().data.numpy(),
-                                       pre_nms_thresh=self.n_train_pre_nms,
-                                       post_nms_thresh=self.n_train_post_nms)
-
-
-            '''iou of each ground truth object with the region proposals, 
-            We will use the same code we have used in Anchor boxes to calculate the ious'''
-            n_sample = 4
-            pos_ratio = 0.5
-            pos_iou_thresh = 0.6
-            neg_iou_thresh_hi = 0.3
-            neg_iou_thresh_lo = 0.0
-
-            ious = self.iou_calc(bbox=gt_boxes, anchor_valid=roi)
-            gt_assignment = ious.argmax(axis=1)
-            max_iou = ious.max(axis=1)
-
-
-            gt_roi_label = labels[gt_assignment]
-
-
-            pos_index = np.where(max_iou >= pos_iou_thresh)[0]
-            pos_roi_per_this_image = n_sample*pos_ratio
-            pos_roi_per_this_image = int(min(pos_roi_per_this_image, pos_index.size))
-
-            if pos_index.size > 0:
-                pos_index = np.random.choice(
-                    pos_index, size=pos_roi_per_this_image, replace=False)
-
-            neg_index = np.where((max_iou < neg_iou_thresh_hi) &
-                                 (max_iou >= neg_iou_thresh_lo))[0]
-            neg_roi_per_this_image = n_sample - pos_roi_per_this_image
-            neg_roi_per_this_image = int(min(neg_roi_per_this_image, neg_index.size))
-            if neg_index.size > 0:
-                neg_index = np.random.choice(
-                    neg_index, size=neg_roi_per_this_image, replace=False)
-
-            keep_index = np.append(pos_index, neg_index)
-            gt_roi_labels = gt_roi_label[keep_index]
-            gt_roi_labels[pos_roi_per_this_image:] = 0  # negative labels --> 0
-
-            sample_roi = roi[keep_index]
-            pos_roi = roi[pos_index]
-
-            bbox_for_sampled_roi = gt_boxes[gt_assignment[keep_index]]
-
-            height = sample_roi[:, 2] - sample_roi[:, 0]
-            width = sample_roi[:, 3] - sample_roi[:, 1]
-            ctr_y = sample_roi[:, 0] + 0.5 * height
-            ctr_x = sample_roi[:, 1] + 0.5 * width
-
-            base_height = bbox_for_sampled_roi[:, 2] - bbox_for_sampled_roi[:, 0]
-            base_width = bbox_for_sampled_roi[:, 3] - bbox_for_sampled_roi[:, 1]
-            base_ctr_y = bbox_for_sampled_roi[:, 0] + 0.5 * base_height
-            base_ctr_x = bbox_for_sampled_roi[:, 1] + 0.5 * base_width
-
-            eps = np.finfo(height.dtype).eps
-            height = np.maximum(height, eps)
-            width = np.maximum(width, eps)
-
-            dy = (base_ctr_y - ctr_y) / height
-            dx = (base_ctr_x - ctr_x) / width
-            dh = np.log(base_height / height)
-            dw = np.log(base_width / width)
-
-            gt_roi_locs = np.vstack((dy, dx, dh, dw)).transpose()
-
-            ##########################################################
-            rois = torch.from_numpy(sample_roi).float()
-            roi_indices = 0 * np.ones((len(rois),), dtype=np.int32)
-            roi_indices = torch.from_numpy(roi_indices).float()
-
-            indices_and_rois = torch.cat([roi_indices[:, None], rois], dim=1)
-            xy_indices_and_rois = indices_and_rois[:, [0, 2, 1, 4, 3]]
-            # check
-            indices_and_rois = xy_indices_and_rois.contiguous()
-
-            output = []
-            rois = indices_and_rois.data.float()
-            rois[:, 1:].mul_(1 / self.sub_sample)  # Subsampling ratio
-            rois = rois.long()
-            num_rois = rois.size(0)
-            for i in range(num_rois):
-                roi = rois[i]
-                im_idx = roi[0]
-                im = out_feature.narrow(0, im_idx, 1)[..., roi[2]:(roi[4] + 1), roi[1]:(roi[3] + 1)]
-                output.append(self.adaptive_max_pool(im))
-
-            output = torch.cat(output, 0)
-            # k = self.roi_head_classifier(output)
-            # k = torch.squeeze(k)
-            k = output.view(output.size(0), -1)
-            '''fast rcnn forward'''
-            # print(out_feature.shape)
-            # print(k.shape)
-            k = self.roi_head_classifier(k)
-            roi_cls_loc = self.cls_loc(k)
-            roi_cls_score = self.score(k)
-            # print(roi_cls_loc.shape)
-
             '''RPN loss'''
-            # print(pred_anchor_locs.shape)
-            # print(pred_cls_scores.shape)
-            # print(anchor_locations.shape)
-            # print(anchor_labels.shape)
-
             rpn_loc = pred_anchor_locs[0]
             rpn_score = pred_cls_scores[0]
 
             gt_rpn_loc = torch.from_numpy(anchor_locations).type(torch.FloatTensor).cuda()
             gt_rpn_score = torch.from_numpy(anchor_labels).cuda()
-            # print(gt_rpn_score.shape)
 
             rpn_cls_loss = F.cross_entropy(rpn_score, gt_rpn_score.long(), ignore_index=-1)
 
@@ -270,14 +142,51 @@ class Solver(object):
 
             rpn_loss = rpn_cls_loss + (rpn_lambda * rpn_loc_loss)
 
+
+            '''anchor proposal'''
+            roi, after_delta = self.anchor_proposal(img_size=(im_h, im_w), anchors=anchors,
+                                       pred_anchor_locs=pred_anchor_locs[0].cpu().data.numpy(),
+                                       objectness_score=objectness_score[0].cpu().data.numpy(),
+                                       pre_nms_thresh=self.n_train_pre_nms,
+                                       post_nms_thresh=self.n_train_post_nms)
+
+
+            '''iou of each ground truth object with the region proposals, 
+            We will use the same code we have used in Anchor boxes to calculate the ious'''
+            sample_roi, gt_roi_labels, gt_roi_locs = self.random_choice_roi(roi=roi, gt_boxes=gt_boxes, labels=labels)
+
+            ##########################################################
+            rois = torch.from_numpy(sample_roi).float()
+            roi_indices = 0 * np.ones((len(rois),), dtype=np.int32)
+            roi_indices = torch.from_numpy(roi_indices).float()
+
+            indices_and_rois = torch.cat([roi_indices[:, None], rois], dim=1)
+            xy_indices_and_rois = indices_and_rois[:, [0, 2, 1, 4, 3]]
+
+            indices_and_rois = xy_indices_and_rois.contiguous()
+
+            output = []
+            rois = indices_and_rois.data.float()
+            rois[:, 1:].mul_(1 / self.sub_sample)  # Subsampling ratio
+            rois = rois.long()
+            num_rois = rois.size(0)
+            for i in range(num_rois):
+                roi = rois[i]
+                im_idx = roi[0]
+                im = out_feature.narrow(0, im_idx, 1)[..., roi[2]:(roi[4] + 1), roi[1]:(roi[3] + 1)]
+                output.append(self.adaptive_max_pool(im))
+
+            output = torch.cat(output, 0)
+            k = output.view(output.size(0), -1)
+
+            '''fast rcnn forward'''
+            k = self.roi_head_classifier(k)
+            roi_cls_loc = self.cls_loc(k)
+            roi_cls_score = self.score(k)
+
             '''Fast RCNN loss'''
-            # print(roi_cls_loc.shape)
-            # print(roi_cls_score.shape)
-            # print(gt_roi_locs.shape)
-            # print(gt_roi_labels.shape)
             gt_roi_locs = torch.from_numpy(gt_roi_locs).type(torch.FloatTensor).cuda()
             gt_roi_labels = torch.from_numpy(np.float32(gt_roi_labels)).long().cuda()
-
 
             roi_cls_loss = F.cross_entropy(roi_cls_score, gt_roi_labels, ignore_index=-1)
             n_sample = roi_cls_loc.shape[0]
@@ -290,16 +199,15 @@ class Solver(object):
 
             roi_mask_loc_preds = roi_loc[roi_mask].view(-1, 4)
             roi_mask_loc_targets = gt_roi_locs[roi_mask].view(-1, 4)
-            # #
+
             x = torch.abs(roi_mask_loc_targets - roi_mask_loc_preds)
             roi_loc_loss = ((x < 1).float() * 0.5 * x ** 2) + ((x >= 1).float() * (x - 0.5))
-            # #
-            roi_lambda = 1.
+
+            roi_lambda = 10.
             N_reg = (gt_roi_labels > 0).float().sum() + 1
             roi_loc_loss = roi_loc_loss.sum() / N_reg
 
             #################################################################
-
             roi_loss = roi_cls_loss + (roi_lambda * roi_loc_loss)
 
             losses['rpn'].append(rpn_loss.item())
@@ -324,90 +232,14 @@ class Solver(object):
             losses['total'].append(total_loss.item())
 
             scores = F.softmax(roi_cls_score, 1).cpu().data.numpy()
-            boxes = sample_roi
-            box_deltas = roi_loc.data
-
-
+            box_deltas = roi_loc.cpu().data.numpy()
             im = im_data.cpu().data.numpy()
 
             self.reset_grad()
 
-            # print(scores.shape)
-            print(scores.shape)
-            # scores = scores.reshape((self.args.batch_size,-1,11))
-            scores = scores[:,1:]
-            idx = np.argmax(scores)
-            # print(idx)
-            # print(idx)
-            print("pred")
-            print(idx-idx//10*10 + 1)
-            # print(scores)
-            # print(scores[idx//10, idx-idx//10*10])
-            # print()
-            print("labels")
-            print(labels)
-            '''
-            # print("asdfadsfsdafs")
-            # print(sample_roi)
-            # print(roi.shape)
-            anchors = anchors[np.where(anchor_labels==1)[0], :]
-            # print(rpn_test_roi.shape)
-            height = anchors[:, 2] - anchors[:, 0]
-            width = anchors[:, 3] - anchors[:, 1]
-            fig, ax = plt.subplots()
-            ax.imshow(np.squeeze(im), cmap='gray')
-            for i in range(anchors.shape[0]):
-                xy = (anchors[i, 1], anchors[i, 0])
-
-                width_tmp = width[0]
-
-                height_tmp = height[0]
-
-                rect = patches.Rectangle(xy=xy, width=width_tmp, height=height_tmp, linewidth=1, edgecolor='r', facecolor='none')
-                ax.add_patch(rect)
-            plt.savefig('before_delta.png')
-
-            after_delta = after_delta[np.where(anchor_labels==1)[0], :]
-            height = after_delta[:, 2] - after_delta[:, 0]
-            width = after_delta[:, 3] - after_delta[:, 1]
-            fig, ax = plt.subplots()
-            ax.imshow(np.squeeze(im), cmap='gray')
-            for i in range(anchors.shape[0]):
-                xy = (after_delta[i, 1], after_delta[i, 0])
-
-                width_tmp = width[0]
-
-                height_tmp = height[0]
-
-                rect = patches.Rectangle(xy=xy, width=width_tmp, height=height_tmp, linewidth=1, edgecolor='r',
-                                         facecolor='none')
-                ax.add_patch(rect)
-            plt.savefig('after_delta.png')
-
-
-            height = pos_roi[:, 2] - pos_roi[:, 0]
-            width = pos_roi[:, 3] - pos_roi[:, 1]
-            fig, ax = plt.subplots()
-            ax.imshow(np.squeeze(im), cmap='gray')
-            for i in range(pos_roi.shape[0]):
-                xy = (pos_roi[i, 1], pos_roi[i, 0])
-
-                width_tmp = width[0]
-
-                height_tmp = height[0]
-
-                rect = patches.Rectangle(xy=xy, width=width_tmp, height=height_tmp, linewidth=1, edgecolor='r',
-                                         facecolor='none')
-                ax.add_patch(rect)
-            plt.savefig('pos_roi.png')
-            '''
-            self.visualize(image=im,scores=scores,boxes=sample_roi)
+            self.visualize(image=im, scores=scores[:, 1:], boxes=sample_roi, box_deltas=box_deltas)
 
         return losses
-
-
-
-
 
     def fill_anchor_base(self, anchor_base=None, sub_sample=None, anchor_ratios=None, anchor_scales=None):
         ctr_y = sub_sample / 2.
@@ -477,6 +309,7 @@ class Solver(object):
 
     def process_anchor(self, im_h=None, im_w=None, bbox=None, sub_sample=None, ratios=None, scales=None, pos_iou_threshold=None, neg_iou_threshold=None):
         anchors = self.full_anchor(size=im_h, sub_sample=sub_sample, ratios=ratios, scales=scales)
+        '''label -1 with labels which are out of image'''
         anchor_valid_index = np.where(
             (anchors[:, 0] >= 0) &
             (anchors[:, 1] >= 0) &
@@ -488,31 +321,26 @@ class Solver(object):
         anchor_valid = anchors[anchor_valid_index]
 
         ious = self.iou_calc(bbox=bbox, anchor_valid=anchor_valid)
-        # print(ious.shape)
 
-        # for entire anchor, which box is closer
+        '''for each anchor, which box is closer'''
         gt_argmax_ious = ious.argmax(axis=0)
 
         gt_max_ious = ious[gt_argmax_ious, np.arange(ious.shape[1])]
 
-
-        # for each anchor, which box is closer
+        '''for each anchor, which box is closer'''
         argmax_ious = ious.argmax(axis=1)
 
-        # ??????
-        # print(len(self.anchor_valid_index) == len(ious))
         max_ious = ious[np.arange(len(ious)), argmax_ious]
-
 
         # find number of anchor which has biggest iou between bbox
         gt_argmax_ious = np.where(ious == gt_max_ious)[0]
 
-
-        # assign anchor label
+        '''Assign anchor labels by thresholding'''
         label[max_ious < neg_iou_threshold] = 0
         label[gt_argmax_ious] = 1
         label[max_ious >= pos_iou_threshold] = 1
 
+        '''To make dataset balance'''
         pos_ratio = 0.5
         n_sample = 256
         n_pos = pos_ratio * n_sample
@@ -529,7 +357,7 @@ class Solver(object):
 
         max_iou_bbox = bbox[argmax_ious]
 
-        # Convert [y1,x1,y2,x2] => [y, x, h, w]
+        '''Convert [y1,x1,y2,x2] => [dy, dx, dh, dw]'''
         height = anchor_valid[:, 2] - anchor_valid[:, 0]
         width = anchor_valid[:, 3] - anchor_valid[:, 1]
         ctr_y = anchor_valid[:, 0] + 0.5 * height
@@ -539,8 +367,6 @@ class Solver(object):
         base_ctr_y = max_iou_bbox[:, 0] + 0.5 * base_height
         base_ctr_x = max_iou_bbox[:, 1] + 0.5 * base_width
 
-        # print(base_ctr_y)
-        # print(ctr_y)
         eps = np.finfo(height.dtype).eps
         height = np.maximum(height, eps)
         width = np.maximum(width, eps)
@@ -550,16 +376,15 @@ class Solver(object):
         dw = np.log(base_width / width)
         anchor_locs = np.vstack((dy, dx, dh, dw)).transpose()
 
-        # Final labels
+        '''anchor labels'''
         anchor_labels = np.empty((len(anchors),), dtype=label.dtype)
         anchor_labels.fill(-1)
         anchor_labels[anchor_valid_index] = label
 
-        # Final locations
+        '''anchor location => [dy, dx, dh, dw]'''
         anchor_locations = np.empty((len(anchors),) + anchors.shape[1:], dtype=anchor_locs.dtype)
         anchor_locations.fill(0)
         anchor_locations[anchor_valid_index, :] = anchor_locs
-        # print(anchor_locations.max())
 
 
         return anchors, anchor_labels, anchor_locations
@@ -603,8 +428,6 @@ class Solver(object):
         dx = pred_anchor_locs_numpy[:, 1::4]
         dh = pred_anchor_locs_numpy[:, 2::4]
         dw = pred_anchor_locs_numpy[:, 3::4]
-
-
         ctr_y = dy * anc_height[:, np.newaxis] + anc_ctr_y[:, np.newaxis]
         ctr_x = dx * anc_width[:, np.newaxis] + anc_ctr_x[:, np.newaxis]
         h = np.exp(dh) * anc_height[:, np.newaxis]
@@ -647,66 +470,108 @@ class Solver(object):
 
         keep = keep[:post_nms_thresh]  # while training/testing , use accordingly
         roi = roi_total[keep]  # the final region proposals
-        # print(roi.shape)
         return roi, after_delta
 
-    def bbox_transform_inv(self, boxes, deltas, batch_size):
-        # delta dy dx dh dw
-        widths = boxes[ :, 2] - boxes[ :, 0] + 1.0
-        heights = boxes[ :, 3] - boxes[ :, 1] + 1.0
-        ctr_x = boxes[ :, 0] + 0.5 * widths
-        ctr_y = boxes[ :, 1] + 0.5 * heights
+    def random_choice_roi(self, roi, gt_boxes, labels):
+        n_sample = 32
+        pos_ratio = 0.5
+        pos_iou_thresh = 0.6
+        neg_iou_thresh_hi = 0.3
+        neg_iou_thresh_lo = 0.0
 
-        dx = deltas[ :, 1]
-        dy = deltas[ :, 0]
-        dw = deltas[ :, 3]
-        dh = deltas[ :, 2]
+        ious = self.iou_calc(bbox=gt_boxes, anchor_valid=roi)
+        gt_assignment = ious.argmax(axis=1)
+        max_iou = ious.max(axis=1)
 
+        gt_roi_label = labels[gt_assignment]
 
-        pred_ctr_x = dx * widths + ctr_x
-        pred_ctr_y = dy * heights + ctr_y
-        # pred_w = torch.
-        pred_ctr_x = dx * widths.unsqueeze(2) + ctr_x.unsqueeze(2)
-        pred_ctr_y = dy * heights.unsqueeze(2) + ctr_y.unsqueeze(2)
-        pred_w = torch.exp(dw) * widths.unsqueeze(2)
-        pred_h = torch.exp(dh) * heights.unsqueeze(2)
+        pos_index = np.where(max_iou >= pos_iou_thresh)[0]
+        pos_roi_per_this_image = n_sample * pos_ratio
+        pos_roi_per_this_image = int(min(pos_roi_per_this_image, pos_index.size))
 
-        pred_boxes = deltas.clone()
-        # x1
-        pred_boxes[:, :, 0::4] = pred_ctr_x - 0.5 * pred_w
-        # y1
-        pred_boxes[:, :, 1::4] = pred_ctr_y - 0.5 * pred_h
-        # x2
-        pred_boxes[:, :, 2::4] = pred_ctr_x + 0.5 * pred_w
-        # y2
-        pred_boxes[:, :, 3::4] = pred_ctr_y + 0.5 * pred_h
+        if pos_index.size > 0:
+            pos_index = np.random.choice(
+                pos_index, size=pos_roi_per_this_image, replace=False)
 
-        return pred_boxes
+        neg_index = np.where((max_iou < neg_iou_thresh_hi) &
+                             (max_iou >= neg_iou_thresh_lo))[0]
+        neg_roi_per_this_image = n_sample - pos_roi_per_this_image
+        neg_roi_per_this_image = int(min(neg_roi_per_this_image, neg_index.size))
+        if neg_index.size > 0:
+            neg_index = np.random.choice(
+                neg_index, size=neg_roi_per_this_image, replace=False)
 
-    def visualize(self, image, scores, boxes):
+        keep_index = np.append(pos_index, neg_index)
+        gt_roi_labels = gt_roi_label[keep_index]
+        gt_roi_labels[pos_roi_per_this_image:] = 0  # negative labels --> 0
+
+        sample_roi = roi[keep_index]
+
+        bbox_for_sampled_roi = gt_boxes[gt_assignment[keep_index]]
+
+        height = sample_roi[:, 2] - sample_roi[:, 0]
+        width = sample_roi[:, 3] - sample_roi[:, 1]
+        ctr_y = sample_roi[:, 0] + 0.5 * height
+        ctr_x = sample_roi[:, 1] + 0.5 * width
+
+        base_height = bbox_for_sampled_roi[:, 2] - bbox_for_sampled_roi[:, 0]
+        base_width = bbox_for_sampled_roi[:, 3] - bbox_for_sampled_roi[:, 1]
+        base_ctr_y = bbox_for_sampled_roi[:, 0] + 0.5 * base_height
+        base_ctr_x = bbox_for_sampled_roi[:, 1] + 0.5 * base_width
+
+        eps = np.finfo(height.dtype).eps
+        height = np.maximum(height, eps)
+        width = np.maximum(width, eps)
+
+        dy = (base_ctr_y - ctr_y) / height
+        dx = (base_ctr_x - ctr_x) / width
+        dh = np.log(base_height / height)
+        dw = np.log(base_width / width)
+
+        gt_roi_locs = np.vstack((dy, dx, dh, dw)).transpose()
+
+        return sample_roi, gt_roi_labels, gt_roi_locs
+
+    def visualize(self, image, scores, boxes, box_deltas):
         sorted_index = scores.ravel().argsort()[::-1]
         [idx1, idx2] = sorted_index[:2]
         idx = [idx1, idx2]
+        print(np.max(scores))
+        print(np.mean(scores))
 
         height = boxes[:, 2] - boxes[:, 0]
         width = boxes[:, 3] - boxes[:, 1]
+        ctr_y = boxes[:, 0] + 0.5 * height
+        ctr_x = boxes[:, 1] + 0.5 * width
+
+        dy = box_deltas[:,0]
+        dx = box_deltas[:,1]
+        dh = box_deltas[:,2]
+        dw = box_deltas[:,3]
+
+        ctr_y_modified = dy * height + ctr_y
+        ctr_x_modified = dx * width + ctr_x
+        height_modified = np.exp(dh)*height
+        width_modified = np.exp(dw)*width
+
+        y1 = ctr_y_modified - height_modified / 2.
+        x1 = ctr_x_modified - width_modified / 2.
+
         fig, ax = plt.subplots()
         ax.imshow(np.squeeze(image), cmap='gray')
         for i in range(len(idx)):
             k = idx[i]
-            xy = (boxes[k//10, 1], boxes[k//10, 0])
+            xy = (x1[k//10], y1[k//10])
 
-            width_tmp = width[k//10]
+            width_tmp = width_modified[k//10]
 
-            height_tmp = height[k//10]
+            height_tmp = height_modified[k//10]
 
             rect = patches.Rectangle(xy=xy, width=width_tmp, height=height_tmp, linewidth=1, edgecolor='r',
                                      facecolor='none')
             ax.add_patch(rect)
             ax.annotate(str(k - k//10*10), xy=(xy[0], xy[1]), color='magenta')
         plt.savefig('result.png')
-
-
 
     def save_rpn(self):
         torch.save(self.feature_extractor.state_dict(), self.args.checkpoint_dir + '/feature_extractor.pth')
@@ -733,6 +598,7 @@ class Solver(object):
             torch.load(self.args.checkpoint_dir + '/cls_loc.pth'))
         self.score.load_state_dict(
             torch.load(self.args.checkpoint_dir + '/score.pth'))
+
 
 
 
