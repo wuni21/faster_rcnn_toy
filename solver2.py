@@ -278,8 +278,7 @@ class Solver(object):
             gt_roi_locs = torch.from_numpy(gt_roi_locs).type(torch.FloatTensor).cuda()
             gt_roi_labels = torch.from_numpy(np.float32(gt_roi_labels)).long().cuda()
 
-            # weight = [.01] + [1.]*10
-            # roi_cls_loss = F.cross_entropy(roi_cls_score, gt_roi_labels, weight=torch.tensor(weight).cuda(), ignore_index=-1)
+
             roi_cls_loss = F.cross_entropy(roi_cls_score, gt_roi_labels, ignore_index=-1)
             n_sample = roi_cls_loc.shape[0]
             roi_loc = roi_cls_loc.view(n_sample, -1, 4)
@@ -402,7 +401,7 @@ class Solver(object):
                 ax.add_patch(rect)
             plt.savefig('pos_roi.png')
             '''
-
+            self.visualize(image=im,scores=scores,boxes=sample_roi)
 
         return losses
 
@@ -684,6 +683,29 @@ class Solver(object):
 
         return pred_boxes
 
+    def visualize(self, image, scores, boxes):
+        sorted_index = scores.ravel().argsort()[::-1]
+        [idx1, idx2] = sorted_index[:2]
+        idx = [idx1, idx2]
+
+        height = boxes[:, 2] - boxes[:, 0]
+        width = boxes[:, 3] - boxes[:, 1]
+        fig, ax = plt.subplots()
+        ax.imshow(np.squeeze(image), cmap='gray')
+        for i in range(len(idx)):
+            k = idx[i]
+            xy = (boxes[k//10, 1], boxes[k//10, 0])
+
+            width_tmp = width[k//10]
+
+            height_tmp = height[k//10]
+
+            rect = patches.Rectangle(xy=xy, width=width_tmp, height=height_tmp, linewidth=1, edgecolor='r',
+                                     facecolor='none')
+            ax.add_patch(rect)
+            ax.annotate(str(k - k//10*10), xy=(xy[0], xy[1]), color='magenta')
+        plt.savefig('result.png')
+
 
 
     def save_rpn(self):
@@ -711,7 +733,6 @@ class Solver(object):
             torch.load(self.args.checkpoint_dir + '/cls_loc.pth'))
         self.score.load_state_dict(
             torch.load(self.args.checkpoint_dir + '/score.pth'))
-
 
 
 
