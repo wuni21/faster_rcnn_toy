@@ -153,7 +153,8 @@ class Solver(object):
 
             '''iou of each ground truth object with the region proposals, 
             We will use the same code we have used in Anchor boxes to calculate the ious'''
-            sample_roi, gt_roi_labels, gt_roi_locs = self.random_choice_roi(roi=roi, gt_boxes=gt_boxes, labels=labels)
+            sample_roi, gt_roi_labels, gt_roi_locs = self.random_choice_roi(roi=roi, gt_boxes=gt_boxes, labels=labels,
+                                                                            n_sample=32, pos_ratio=0.5)
 
             ##########################################################
             rois = torch.from_numpy(sample_roi).float()
@@ -240,6 +241,149 @@ class Solver(object):
             # self.visualize(image=im, scores=scores[:, 1:], boxes=sample_roi, box_deltas=box_deltas)
 
         return losses
+
+
+
+    '''Test'''
+    def test(self):
+        self.feature_extractor.eval()
+        self.rpn.eval()
+        self.roi_head_classifier.eval()
+        self.cls_loc.eval()
+        self.score.eval()
+
+        device = 'cuda' if self.args.cuda else 'cpu'
+
+        '''
+        Define Loss array
+        '''
+        ##################################################################################
+        with torch.no_grad():
+            for batch_idx, (im_data, gt_boxes, labels) in enumerate(tqdm(self.train_loader, desc='Test')):
+                im_data, gt_boxes, labels = im_data.to(device), np.squeeze(gt_boxes), labels
+                gt_boxes = np.squeeze(gt_boxes.numpy())
+                labels = np.squeeze(labels.numpy())
+                im_h, im_w = im_data.size()[2], im_data.size()[3]
+
+                '''Process anchor'''
+                '''Make Anchor boxes and label them based on thresholds'''
+                anchors, anchor_labels, anchor_locations = self.process_anchor(im_h=im_h, im_w=im_w, bbox=gt_boxes, sub_sample=self.sub_sample,
+                                                                      ratios=self.anchor_ratios, scales=self.anchor_scales,
+                                                                      pos_iou_threshold=self.pos_iou_threshold,
+                                                                      neg_iou_threshold=self.neg_iou_threshold)
+
+
+                '''RPN network forward'''
+                out_feature = self.feature_extractor(im_data)
+                pred_anchor_locs, pred_cls_scores = self.rpn(out_feature)
+
+                '''reformat to align with our anchor targets'''
+                pred_anchor_locs = pred_anchor_locs.permute(0, 2, 3, 1).contiguous().view(1, -1, 4)
+                pred_cls_scores = pred_cls_scores.permute(0, 2, 3, 1).contiguous()
+                objectness_score = pred_cls_scores.view(1, 50, 50, 9, 2)[:, :, :, :, 1].contiguous().view(1, -1)
+                pred_cls_scores = pred_cls_scores.view(1, -1, 2)
+
+                '''RPN loss'''
+                rpn_loc = pred_anchor_locs[0]
+                rpn_score = pred_cls_scores[0]
+
+                gt_rpn_loc = torch.from_numpy(anchor_locations).type(torch.FloatTensor).cuda()
+                gt_rpn_score = torch.from_numpy(anchor_labels).cuda()
+
+                rpn_cls_loss = F.cross_entropy(rpn_score, gt_rpn_score.long(), ignore_index=-1)
+
+                pos = gt_rpn_score > 0
+                mask = pos.unsqueeze(1).expand_as(rpn_loc)
+                mask_loc_preds = rpn_loc[mask].view(-1, 4)
+                mask_loc_targets = gt_rpn_loc[mask].view(-1, 4)
+
+                x = torch.abs(mask_loc_targets - mask_loc_preds)
+                rpn_loc_loss = ((x < 1).float() * 0.5 * x ** 2) + ((x >= 1).float() * (x - 0.5))
+
+                rpn_lambda = 10.
+                N_reg = (gt_rpn_score > 0).float().sum()
+                rpn_loc_loss = rpn_loc_loss.sum() / N_reg
+
+                rpn_loss = rpn_cls_loss + (rpn_lambda * rpn_loc_loss)
+
+
+                '''anchor proposal'''
+                roi, after_delta = self.anchor_proposal(img_size=(im_h, im_w), anchors=anchors,
+                                           pred_anchor_locs=pred_anchor_locs[0].cpu().data.numpy(),
+                                           objectness_score=objectness_score[0].cpu().data.numpy(),
+                                           pre_nms_thresh=self.n_test_pre_nms,
+                                           post_nms_thresh=self.n_test_post_nms)
+
+
+                '''iou of each ground truth object with the region proposals, 
+                We will use the same code we have used in Anchor boxes to calculate the ious'''
+                sample_roi, gt_roi_labels, gt_roi_locs = self.random_choice_roi(roi=roi, gt_boxes=gt_boxes,
+                                                                                labels=labels, n_sample=32, pos_ratio=1.)
+                # sample_roi, gt_roi_labels, gt_roi_locs = self.choice_roi(roi=roi, gt_boxes=gt_boxes,
+                #                                                                 labels=labels)
+
+                ##########################################################
+                rois = torch.from_numpy(sample_roi).float()
+                roi_indices = 0 * np.ones((len(rois),), dtype=np.int32)
+                roi_indices = torch.from_numpy(roi_indices).float()
+
+                indices_and_rois = torch.cat([roi_indices[:, None], rois], dim=1)
+                xy_indices_and_rois = indices_and_rois[:, [0, 2, 1, 4, 3]]
+
+                indices_and_rois = xy_indices_and_rois.contiguous()
+
+                output = []
+                rois = indices_and_rois.data.float()
+                rois[:, 1:].mul_(1 / self.sub_sample)  # Subsampling ratio
+                rois = rois.long()
+                num_rois = rois.size(0)
+                for i in range(num_rois):
+                    roi = rois[i]
+                    im_idx = roi[0]
+                    im = out_feature.narrow(0, im_idx, 1)[..., roi[2]:(roi[4] + 1), roi[1]:(roi[3] + 1)]
+                    output.append(self.adaptive_max_pool(im))
+
+                output = torch.cat(output, 0)
+                k = output.view(output.size(0), -1)
+
+                '''fast rcnn forward'''
+                k = self.roi_head_classifier(k)
+                roi_cls_loc = self.cls_loc(k)
+                roi_cls_score = self.score(k)
+
+                '''Fast RCNN loss'''
+                gt_roi_locs = torch.from_numpy(gt_roi_locs).type(torch.FloatTensor).cuda()
+                gt_roi_labels = torch.from_numpy(np.float32(gt_roi_labels)).long().cuda()
+
+                roi_cls_loss = F.cross_entropy(roi_cls_score, gt_roi_labels, ignore_index=-1)
+                n_sample = roi_cls_loc.shape[0]
+                roi_loc = roi_cls_loc.view(n_sample, -1, 4)
+                roi_loc = roi_loc[torch.arange(0, n_sample).long(), gt_roi_labels]
+
+                ################################################################
+                roi_pos = gt_roi_labels > 0
+                roi_mask = roi_pos.unsqueeze(1).expand_as(roi_loc)
+
+                roi_mask_loc_preds = roi_loc[roi_mask].view(-1, 4)
+                roi_mask_loc_targets = gt_roi_locs[roi_mask].view(-1, 4)
+
+                x = torch.abs(roi_mask_loc_targets - roi_mask_loc_preds)
+                roi_loc_loss = ((x < 1).float() * 0.5 * x ** 2) + ((x >= 1).float() * (x - 0.5))
+
+                roi_lambda = 10.
+                N_reg = (gt_roi_labels > 0).float().sum() + 1
+                roi_loc_loss = roi_loc_loss.sum() / N_reg
+
+                #################################################################
+                roi_loss = roi_cls_loss + (roi_lambda * roi_loc_loss)
+
+
+                scores = F.softmax(roi_cls_score, 1).cpu().data.numpy()
+                box_deltas = roi_loc.cpu().data.numpy()
+                im = im_data.cpu().data.numpy()
+
+                self.visualize(image=im, scores=scores[:, 1:], boxes=sample_roi, box_deltas=box_deltas)
+
 
     def fill_anchor_base(self, anchor_base=None, sub_sample=None, anchor_ratios=None, anchor_scales=None):
         ctr_y = sub_sample / 2.
@@ -472,9 +616,9 @@ class Solver(object):
         roi = roi_total[keep]  # the final region proposals
         return roi, after_delta
 
-    def random_choice_roi(self, roi, gt_boxes, labels):
-        n_sample = 32
-        pos_ratio = 0.5
+    def random_choice_roi(self, roi, gt_boxes, labels, n_sample, pos_ratio):
+        n_sample = n_sample
+        pos_ratio = pos_ratio
         pos_iou_thresh = 0.6
         neg_iou_thresh_hi = 0.3
         neg_iou_thresh_lo = 0.0

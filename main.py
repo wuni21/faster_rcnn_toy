@@ -79,15 +79,14 @@ def train_frcnn():
         delta = delta-min*60
         sec = int(delta)
         print("{}h {}m {}s Left".format(hour, min, sec))
+        solver.save_frcnn()
 
 
-# def test():
-#     solver = Solver(args)
-#     solver.load_frcnn()
-#     solver.load_rpn()
-#     test_result = solver.test()
-#     for _, key in enumerate(test_result.keys()):
-#         print(str(key) + ': ' + str(torch.mean(torch.FloatTensor(test_result[key]))))
+def test():
+    solver = Solver(args)
+    solver.load_frcnn()
+    solver.load_rpn()
+    solver.test()
 
 
 if __name__=='__main__':
