@@ -39,10 +39,10 @@ class Solver(object):
 
         self.opt_rpn = optim.SGD(list(self.feature_extractor.parameters())+list(self.rpn.parameters()), lr=0.001, momentum=0.9)
 
-        # self.opt_roi = optim.Adam(list(self.feature_extractor.parameters()) + list(self.roi_head_classifier.parameters())
-        #                           + list(self.cls_loc.parameters()) + list(self.score.parameters()), lr=0.0001)
-        self.opt_roi = optim.SGD(list(self.feature_extractor.parameters()) + list(self.roi_head_classifier.parameters())
-                                  + list(self.cls_loc.parameters()) + list(self.score.parameters()), lr=0.001, momentum=0.9)
+        self.opt_roi = optim.Adam(list(self.feature_extractor.parameters()) + list(self.roi_head_classifier.parameters())
+                                  + list(self.cls_loc.parameters()) + list(self.score.parameters()), lr=0.0001)
+        # self.opt_roi = optim.SGD(list(self.feature_extractor.parameters()) + list(self.roi_head_classifier.parameters())
+        #                           + list(self.cls_loc.parameters()) + list(self.score.parameters()), lr=0.001, momentum=0.9)
 
 
         '''sub sample rate'''
@@ -136,7 +136,7 @@ class Solver(object):
             x = torch.abs(mask_loc_targets - mask_loc_preds)
             rpn_loc_loss = ((x < 1).float() * 0.5 * x ** 2) + ((x >= 1).float() * (x - 0.5))
 
-            rpn_lambda = 2.
+            rpn_lambda = 10.
             N_reg = (gt_rpn_score > 0).float().sum()
             rpn_loc_loss = rpn_loc_loss.sum() / N_reg
 
@@ -204,7 +204,7 @@ class Solver(object):
             x = torch.abs(roi_mask_loc_targets - roi_mask_loc_preds)
             roi_loc_loss = ((x < 1).float() * 0.5 * x ** 2) + ((x >= 1).float() * (x - 0.5))
 
-            roi_lambda = 10.
+            roi_lambda = 1.
             N_reg = (gt_roi_labels > 0).float().sum() + 1
             roi_loc_loss = roi_loc_loss.sum() / N_reg
 
@@ -382,7 +382,7 @@ class Solver(object):
                 box_deltas = roi_loc.cpu().data.numpy()
                 im = im_data.cpu().data.numpy()
 
-                self.visualize(image=im, scores=scores[:, 1:], boxes=sample_roi, box_deltas=box_deltas)
+                self.visualize(image=im, scores=scores[:, 1:], boxes=sample_roi, box_deltas=box_deltas, iter=batch_idx)
 
 
     def fill_anchor_base(self, anchor_base=None, sub_sample=None, anchor_ratios=None, anchor_scales=None):
@@ -676,12 +676,13 @@ class Solver(object):
 
         return sample_roi, gt_roi_labels, gt_roi_locs
 
-    def visualize(self, image, scores, boxes, box_deltas):
+    def visualize(self, image, scores, boxes, box_deltas, iter):
         sorted_index = scores.ravel().argsort()[::-1]
         [idx1, idx2] = sorted_index[:2]
         idx = [idx1, idx2]
-        print(np.max(scores))
-        print(np.mean(scores))
+        # idx = np.where(scores>0.1)[0]
+        # print(np.max(scores))
+        # print(np.mean(scores))
 
         height = boxes[:, 2] - boxes[:, 0]
         width = boxes[:, 3] - boxes[:, 1]
@@ -715,7 +716,7 @@ class Solver(object):
                                      facecolor='none')
             ax.add_patch(rect)
             ax.annotate(str(k - k//10*10), xy=(xy[0], xy[1]), color='magenta')
-        plt.savefig('result.png')
+        plt.savefig(self.args.result_dir + '/result' + str(iter) + '.png')
 
     def save_rpn(self):
         torch.save(self.feature_extractor.state_dict(), self.args.checkpoint_dir + '/feature_extractor.pth')
@@ -742,16 +743,3 @@ class Solver(object):
             torch.load(self.args.checkpoint_dir + '/cls_loc.pth'))
         self.score.load_state_dict(
             torch.load(self.args.checkpoint_dir + '/score.pth'))
-
-
-
-
-
-
-
-
-
-
-
-
-
