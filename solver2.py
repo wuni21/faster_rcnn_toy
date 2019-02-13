@@ -237,7 +237,7 @@ class Solver(object):
 
             self.reset_grad()
 
-            self.visualize(image=im, scores=scores[:, 1:], boxes=sample_roi, box_deltas=box_deltas)
+            # self.visualize(image=im, scores=scores[:, 1:], boxes=sample_roi, box_deltas=box_deltas)
 
         return losses
 
