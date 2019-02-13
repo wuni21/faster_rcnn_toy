@@ -136,7 +136,7 @@ class Solver(object):
             x = torch.abs(mask_loc_targets - mask_loc_preds)
             rpn_loc_loss = ((x < 1).float() * 0.5 * x ** 2) + ((x >= 1).float() * (x - 0.5))
 
-            rpn_lambda = 10.
+            rpn_lambda = 2.
             N_reg = (gt_rpn_score > 0).float().sum()
             rpn_loc_loss = rpn_loc_loss.sum() / N_reg
 
